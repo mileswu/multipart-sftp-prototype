@@ -116,7 +116,7 @@ int main(int argc, char *argv[])
 
     if (!sftp_session) {
         fprintf(stderr, "Unable to init SFTP session\n");
-        goto shutdown;
+        //goto shutdown;
     }
 
     /* Since we have not set non-blocking, tell libssh2 we are blocking */
@@ -125,7 +125,7 @@ int main(int argc, char *argv[])
 	 sftp_handle = libssh2_sftp_open(sftp_session, sftppath, LIBSSH2_FXF_READ, LIBSSH2_SFTP_S_IRWXU);
 	 if(!sftp_handle) {
         fprintf(stderr, "Unable to open file\n");
-        goto shutdown;
+        //goto shutdown;
     }
 
 	 LIBSSH2_SFTP_ATTRIBUTES att;
@@ -139,37 +139,76 @@ int main(int argc, char *argv[])
 		 fputc(0, f);
 	 rewind(f);
 
+	 int threads=4;
+
+	 int fx_sock[threads];
+	 LIBSSH2_SESSION *fx_session[threads];
+	 LIBSSH2_SFTP *fx_sftp_session[threads];
+	 LIBSSH2_SFTP_HANDLE *fx_sftp_handle[threads];
+	 int buffer_size = 100*1024;
+	 size_t amount_dl[threads], offsets[threads+1];
+	 char *buffer[threads];
+
+	 for(i=0; i<threads; i++) {
+		 fx_session[i] = libssh2_session_init();
+		 start_session(fx_session[i], &(fx_sock[i]));
+		 fx_sftp_session[i] = libssh2_sftp_init(fx_session[i]);
+		 fx_sftp_handle[i] = libssh2_sftp_open(fx_sftp_session[i], sftppath, LIBSSH2_FXF_READ, LIBSSH2_SFTP_S_IRWXU);
+		 buffer[i] = malloc(sizeof(char)*buffer_size);
+		 amount_dl[i] = 0;
+		 offsets[i] = i*att.filesize/threads;
+		 printf("Offsets: %d\n", offsets[i]);
+		 libssh2_session_set_blocking(fx_session[i], 1);
+		 libssh2_sftp_seek(fx_sftp_handle[i], offsets[i]);
+		 libssh2_session_set_blocking(fx_session[i], 0);
+	 }
+	 offsets[threads] = att.filesize;
+
 	 gettimeofday(&tp, NULL);
-    libssh2_session_set_blocking(session, 0);
 	 printf("Starting file xfer\n");
 
-	 int buffer_size = 100*1024;
-	 size_t amount_dl = 0;
-	 char *buffer = malloc(sizeof(char) * buffer_size);
 	 for(;;) {
-         size_t s = libssh2_sftp_read(sftp_handle, buffer, buffer_size);
+		   int j;
+			fd_set fd;
+			FD_ZERO(&fd);
+		 	for(j=0; j<threads; j++) {
+				if(amount_dl[j] >= offsets[j+1] - offsets[j])
+					continue;
+				
+				size_t s = libssh2_sftp_read(fx_sftp_handle[j], buffer[j], buffer_size);
+				
+				if(s == LIBSSH2_ERROR_EAGAIN) {}
+				else if(s == 0)
+					break;
+				else if(s < 0) {
+					fprintf(stderr, "Failure of sftp read\n");
+					break;
+				}
+				else {
+					fseek(f, amount_dl[j] + offsets[j], SEEK_SET);
 
+					amount_dl[j] += s;
+					if(amount_dl[j] > offsets[j+1] - offsets[j]) {
+						size_t amount_over = amount_dl[j] - offsets[j+1] + offsets[j];
+						fwrite((void *)buffer[j], s - amount_over, 1, f);
+						amount_dl[j] = offsets[j+1] - offsets[j];
+					}
+					else
+						fwrite((void *)buffer[j], s, 1, f);
+				}
+				FD_SET(fx_sock[j], &fd);
+			}
+
+			size_t total = 0;
+			for(j=0; j<threads; j++)
+				total += amount_dl[j];
+			if(total >= offsets[threads])
+				break;
 			
-			if(s == LIBSSH2_ERROR_EAGAIN) {}
-			else if(s == 0)
-				break;
-			else if(s < 0) {
-				fprintf(stderr, "Failure of sftp read\n");
-				break;
-			}
-			else {
-				amount_dl += s;
-				int percentage = amount_dl*100/att.filesize;
-				printf("\rProgress: %d", percentage);
-				fwrite((void *)buffer, s, 1, f);
-			}
 
-		fd_set fd;
-		FD_ZERO(&fd);
-		FD_SET(sock, &fd);
-		struct timeval timeout;
-		timeout.tv_sec = 30; timeout.tv_usec = 0;
-		select(sock+1, &fd, NULL, NULL, &timeout);
+			struct timeval timeout;
+			timeout.tv_sec = 30; timeout.tv_usec = 0;
+			//select(fx_sock[threads-1]+1, &fd, NULL, NULL, &timeout);
     }
 	 printf("\n");
 	 
