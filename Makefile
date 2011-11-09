@@ -4,7 +4,7 @@ CC = gcc
 all: sftp
 
 sftp: sftp.o
-	$(CC) -o $@ $^ -L./libssh2/src/.libs -lssh2
+	$(CC) -o $@ $^ -static -L./libssh2/src/.libs -lssh2 -lssl -lcrypto -lz -ldl
 
 clean:
 	$(RM) *.o
